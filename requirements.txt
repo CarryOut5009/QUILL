@@ -1,0 +1,11 @@
+# QUILL R&D Application - Required Packages
+
+# GUI Framework
+PyQt6==6.6.1
+
+# Grammar Checking (simplest option for R&D)
+language-tool-python==2.8.0
+
+# Optional: If you want to test model loading later
+transformers==4.36.0
+torch==2.1.0
