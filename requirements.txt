@@ -8,4 +8,4 @@ language-tool-python==2.8.0
 
 # Optional: If you want to test model loading later
 transformers==4.36.0
-torch==2.1.0
+torch==2.1.
