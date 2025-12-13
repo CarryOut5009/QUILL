@@ -7,8 +7,9 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QTextEdit, QLabel, 
                              QListWidget, QSplitter, QTabWidget, QGroupBox,
                              QProgressBar, QMessageBox, QRadioButton, QButtonGroup,
-                             QFileDialog, QMenu)
-from PyQt6.QtGui import QTextCharFormat, QColor, QFont, QTextCursor, QAction
+                             QFileDialog, QMenu, QStatusBar, QListWidgetItem, QInputDialog)
+from PyQt6.QtGui import QTextCharFormat, QColor, QFont, QTextCursor, QAction, QKeySequence, QShortcut, QKeySequence
+from PyQt6.QtGui import QShortcut
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 import language_tool_python
 
@@ -53,7 +54,7 @@ class ModelLoaderThread(QThread):
             start_time = time.time()
             
             # Load instruction-tuned model
-            generator = pipeline('text2text-generation', model='google/flan-t5-base')
+            generator = pipeline('text2text-generation', model='google/flan-t5-large')
             
             # Apply quantization if requested
             if self.quantized and TRANSFORMERS_AVAILABLE:
@@ -185,6 +186,10 @@ class QuillRnD(QMainWindow):
         
         self.init_ui()
         
+        # Setup keyboard shortcuts and status bar
+        self.setup_keyboard_shortcuts()
+        self.setup_status_bar()
+        
         print("\n" + "="*60)
         print("APPLICATION READY - All core systems initialized")
         print("="*60)
@@ -287,7 +292,7 @@ class QuillRnD(QMainWindow):
             start_time = time.time()
             
             # Load model
-            self.text_generator = pipeline('text2text-generation', model='google/flan-t5-base')
+            self.text_generator = pipeline('text2text-generation', model='google/flan-t5-large')
             
             # Apply quantization if requested
             if quantized:
@@ -349,7 +354,7 @@ class QuillRnD(QMainWindow):
         
         tabs.addTab(self.create_grammar_tab(), "Writing Assistant")
         tabs.addTab(self.create_model_tab(), "AI Model Testing")
-        tabs.addTab(self.create_database_tab(), "Database Testing")
+        tabs.addTab(self.create_database_tab(), "Database")
         tabs.addTab(self.create_metrics_tab(), "Performance Metrics")
         
         main_layout.addWidget(tabs)
@@ -372,8 +377,13 @@ class QuillRnD(QMainWindow):
         
         save_btn = QPushButton("💾 Save File")
         save_btn.clicked.connect(self.save_file)
-        save_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px;")
+        save_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 3px;")
         file_btn_layout.addWidget(save_btn)
+        
+        save_as_btn = QPushButton("📝 Save As")
+        save_as_btn.clicked.connect(self.save_file_as)
+        save_as_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 3px;")
+        file_btn_layout.addWidget(save_as_btn)
         
         save_db_btn = QPushButton("📥 Save to Database")
         save_db_btn.clicked.connect(self.save_to_database)
@@ -670,6 +680,27 @@ class QuillRnD(QMainWindow):
         
         layout.addWidget(stats_group)
         
+        # Document Viewer (NEW FEATURE 2)
+        viewer_group = QGroupBox("Saved Documents")
+        viewer_layout = QVBoxLayout()
+        viewer_group.setLayout(viewer_layout)
+        
+        self.doc_list = QListWidget()
+        self.doc_list.itemDoubleClicked.connect(self.load_document_from_db)
+        viewer_layout.addWidget(self.doc_list)
+        
+        refresh_docs_btn = QPushButton("Refresh Document List")
+        refresh_docs_btn.clicked.connect(self.refresh_document_list)
+        refresh_docs_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px; border-radius: 3px;")
+        viewer_layout.addWidget(refresh_docs_btn)
+        
+        load_doc_btn = QPushButton("Load Selected Document")
+        load_doc_btn.clicked.connect(self.load_selected_document)
+        load_doc_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px; border-radius: 3px;")
+        viewer_layout.addWidget(load_doc_btn)
+        
+        layout.addWidget(viewer_group)
+        
         # Test save/load
         test_group = QGroupBox("Test Save/Load Preferences")
         test_layout = QVBoxLayout()
@@ -703,6 +734,9 @@ class QuillRnD(QMainWindow):
         
         layout.addWidget(test_group)
         layout.addStretch()
+        
+        # Auto-refresh document list
+        QTimer.singleShot(100, self.refresh_document_list)
         
         return widget
     
@@ -905,22 +939,20 @@ class QuillRnD(QMainWindow):
             if self.realtime_check.isChecked():
                 QTimer.singleShot(500, self.check_grammar)
             
+            # Update status bar
+            self.update_status_bar()
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open file:\n{str(e)}")
     
     def save_file(self):
-        """Save text to a file"""
+        """Save text to current file or use Save As if new (FEATURE 3)"""
         if self.current_file_path:
+            # Save to existing file
             file_path = self.current_file_path
         else:
-            file_path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save File",
-                "",
-                "Text Files (*.txt);;Markdown Files (*.md);;All Files (*)"
-            )
-        
-        if not file_path:
+            # No current file, use Save As
+            self.save_file_as()
             return
         
         try:
@@ -928,23 +960,39 @@ class QuillRnD(QMainWindow):
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(text)
             
-            self.current_file_path = file_path
+            self.update_status_bar()
+            if hasattr(self, 'status_saved'):
+                self.status_saved.setText(f"Saved at {time.strftime('%H:%M:%S')}")
+                QTimer.singleShot(3000, lambda: self.status_saved.setText(""))
             print(f"✓ Saved file: {file_path}")
-            QMessageBox.information(self, "Success", f"File saved: {os.path.basename(file_path)}")
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save file:\n{str(e)}")
     
     def save_to_database(self):
-        """Save current document to database"""
+        """Save current document to database with custom name"""
         text = self.text_editor.toPlainText()
         
         if not text.strip():
             QMessageBox.warning(self, "No Content", "Please enter some text first!")
             return
         
-        filename = self.current_file_path if self.current_file_path else "Untitled Document"
-        filename = os.path.basename(filename)
+        # Get default filename
+        default_name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled Document"
+        
+        # Prompt user for filename
+        filename, ok = QInputDialog.getText(
+            self,
+            "Save to Database",
+            "Enter document name:",
+            text=default_name
+        )
+        
+        # If user cancelled or entered empty name, use default
+        if not ok or not filename.strip():
+            if not ok:
+                return  # User cancelled
+            filename = default_name
         
         save_time = self.save_document_to_db(filename, text)
         self.update_doc_stats()
@@ -1315,6 +1363,145 @@ class QuillRnD(QMainWindow):
         report += "✓ Document storage\n"
         
         self.metrics_display.setText(report)
+    
+
+    def save_file_as(self):
+        """Save file with new name (always prompts) - FEATURE 3"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save File As",
+            "",
+            "Text Files (*.txt);;Markdown Files (*.md);;All Files (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        try:
+            text = self.text_editor.toPlainText()
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            
+            self.current_file_path = file_path
+            self.update_status_bar()
+            if hasattr(self, 'status_saved'):
+                self.status_saved.setText(f"Saved at {time.strftime('%H:%M:%S')}")
+                QTimer.singleShot(3000, lambda: self.status_saved.setText(""))
+            print(f"✓ Saved file as: {file_path}")
+            QMessageBox.information(self, "Success", f"File saved: {os.path.basename(file_path)}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save file:\n{str(e)}")
+    
+    def new_document(self):
+        """Create new document - FEATURE 4"""
+        if self.text_editor.toPlainText().strip():
+            reply = QMessageBox.question(self, 'New Document', 
+                                        'Current document will be cleared. Continue?',
+                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.No:
+                return
+        
+        self.text_editor.clear()
+        self.current_file_path = None
+        self.update_status_bar()
+        print("✓ New document created")
+    
+    def setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts - FEATURE 4"""
+        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_file)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(self.save_file_as)
+        QShortcut(QKeySequence("Ctrl+N"), self).activated.connect(self.new_document)
+        print("✓ Keyboard shortcuts enabled: Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+N")
+    
+    def setup_status_bar(self):
+        """Setup status bar at bottom of window - FEATURE 5"""
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        
+        # Create status labels
+        self.status_file = QLabel("No file loaded")
+        self.status_words = QLabel("Words: 0")
+        self.status_chars = QLabel("Characters: 0")
+        self.status_saved = QLabel("")
+        
+        self.status_bar.addWidget(self.status_file)
+        self.status_bar.addPermanentWidget(self.status_words)
+        self.status_bar.addPermanentWidget(self.status_chars)
+        self.status_bar.addPermanentWidget(self.status_saved)
+        
+        # Connect text editor to update status
+        self.text_editor.textChanged.connect(self.update_status_bar)
+        
+        print("✓ Status bar initialized")
+    
+    def update_status_bar(self):
+        """Update status bar with current document stats - FEATURE 5"""
+        if not hasattr(self, 'status_words'):
+            return  # Status bar not yet initialized
+            
+        text = self.text_editor.toPlainText()
+        word_count = len(text.split()) if text.strip() else 0
+        char_count = len(text)
+        
+        self.status_words.setText(f"Words: {word_count}")
+        self.status_chars.setText(f"Characters: {char_count}")
+        
+        if self.current_file_path:
+            self.status_file.setText(f"File: {os.path.basename(self.current_file_path)}")
+        else:
+            self.status_file.setText("Untitled Document")
+    
+    def refresh_document_list(self):
+        """Refresh the list of saved documents from database - FEATURE 2"""
+        if not hasattr(self, 'doc_list'):
+            return  # UI not yet initialized
+            
+        self.doc_list.clear()
+        
+        self.cursor.execute('SELECT id, filename, created_at FROM documents ORDER BY created_at DESC')
+        documents = self.cursor.fetchall()
+        
+        for doc_id, filename, created_at in documents:
+            item_text = f"{filename} - {created_at}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, doc_id)  # Store ID
+            self.doc_list.addItem(item)
+        
+        print(f"✓ Loaded {len(documents)} documents from database")
+    
+    def load_selected_document(self):
+        """Load the selected document from the list - FEATURE 2"""
+        current_item = self.doc_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "No Selection", "Please select a document to load")
+            return
+        
+        doc_id = current_item.data(Qt.ItemDataRole.UserRole)
+        self.load_document_from_db_by_id(doc_id)
+    
+    def load_document_from_db(self, item):
+        """Load a document from database when double-clicked - FEATURE 2"""
+        doc_id = item.data(Qt.ItemDataRole.UserRole)
+        self.load_document_from_db_by_id(doc_id)
+    
+    def load_document_from_db_by_id(self, doc_id):
+        """Load a document from database by ID - FEATURE 2"""
+        self.cursor.execute('SELECT filename, content FROM documents WHERE id = ?', (doc_id,))
+        result = self.cursor.fetchone()
+        
+        if result:
+            filename, content = result
+            self.text_editor.setPlainText(content)
+            self.current_file_path = None  # Mark as unsaved to disk
+            self.update_status_bar()
+            if hasattr(self, 'status_file'):
+                self.status_file.setText(f"DB: {filename}")
+            print(f"✓ Loaded document from database: {filename}")
+            QMessageBox.information(self, "Success", f"Loaded: {filename}")
+        else:
+            QMessageBox.warning(self, "Error", "Document not found in database")
     
     def closeEvent(self, event):
         """Clean up when closing"""
