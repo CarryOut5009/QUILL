@@ -1,11 +1,42 @@
-# QUILL R&D Application - Required Packages
+# QUILL - Privacy-First Local AI Writing Assistant
+# Required Packages for Running the Application
+
+# ============================================
+# REQUIRED PACKAGES (Must Install)
+# ============================================
 
 # GUI Framework
 PyQt6==6.6.1
 
-# Grammar Checking (simplest option for R&D)
+# Grammar Checking Engine
 language-tool-python==2.8.0
 
-# Optional: If you want to test model loading later
+# System Performance Monitoring
+psutil==5.9.6
+
+# ============================================
+# OPTIONAL PACKAGES (For Full Features)
+# ============================================
+
+# AI Text Generation & Transformation
+# Note: These are large downloads (~1-2GB total)
+# The app will work without them, but AI features will be disabled
 transformers==4.36.0
-torch==2.1.
+torch==2.1.0
+
+# Word Document Support (.docx files)
+# Optional: Install only if you need to open/save .docx files
+# python-docx==1.1.0
+
+# ============================================
+# INSTALLATION INSTRUCTIONS
+# ============================================
+
+# Install minimum required packages (grammar checking only):
+#   pip install PyQt6 language-tool-python psutil
+
+# Install everything including AI features:
+#   pip install -r requirements.txt
+
+# Install with .docx support:
+#   pip install -r requirements.txt python-docx
