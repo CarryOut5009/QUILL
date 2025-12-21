@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QTextEdit, QLabel, 
                              QListWidget, QSplitter, QTabWidget, QGroupBox,
                              QProgressBar, QMessageBox, QRadioButton, QButtonGroup,
-                             QFileDialog, QMenu, QStatusBar, QListWidgetItem, QInputDialog)
+                             QFileDialog, QMenu, QStatusBar, QListWidgetItem, QInputDialog,
+                             QScrollArea, QFrame)
 from PyQt6.QtGui import QTextCharFormat, QColor, QFont, QTextCursor, QAction, QKeySequence, QShortcut
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 import language_tool_python
@@ -31,133 +32,56 @@ try:
 except ImportError:
     print("⚠ python-docx not installed (install for .docx support)")
 
-class ModelLoaderThread(QThread):
-    """Background thread for loading heavy models"""
-    finished = pyqtSignal(str, float, float)  # message, time_taken, memory_mb
-    progress = pyqtSignal(str)
-    
-    def __init__(self, quantized=False):
-        super().__init__()
-        self.quantized = quantized
-    
-    def run(self):
-        """Load GPT-2 model in background"""
-        try:
-            model_type = "quantized" if self.quantized else "standard"
-            self.progress.emit(f"Loading {model_type} GPT-2-Medium model...")
-            
-            # Measure memory before
-            process = psutil.Process()
-            mem_before = process.memory_info().rss / 1024 / 1024  # MB
-            
-            start_time = time.time()
-            
-            # Load instruction-tuned model (USING GPT-2-Medium)
-            generator = pipeline('text-generation', model='gpt2-medium')
-            
-            # Apply quantization if requested
-            if self.quantized and TRANSFORMERS_AVAILABLE:
-                self.progress.emit("Applying dynamic quantization...")
-                generator.model = torch.quantization.quantize_dynamic(
-                    generator.model, {torch.nn.Linear}, dtype=torch.qint8
-                )
-            
-            load_time = time.time() - start_time
-            
-            # Measure memory after
-            mem_after = process.memory_info().rss / 1024 / 1024  # MB
-            memory_used = mem_after - mem_before
-            
-            self.progress.emit("Testing text generation...")
-            
-            # Test generation
-            test_output = generator("paraphrase: The weather is nice today")
-            
-            message = f"✓ Model loaded successfully!\n\nLoad time: {load_time:.2f}s\nMemory used: {memory_used:.1f}MB\n\nTest output: {test_output[0]['generated_text']}"
-            self.finished.emit(message, load_time, memory_used)
-            
-        except Exception as e:
-            self.finished.emit(f"✗ Error loading model: {str(e)}", 0.0, 0.0)
-
 class TextGeneratorThread(QThread):
     """Background thread for text generation to keep UI responsive"""
-    finished = pyqtSignal(str, float)
+    finished = pyqtSignal(list, float)  # List of 3 suggestions, time taken
     progress = pyqtSignal(str)
     
-    def __init__(self, generator, prompt, max_length, task_type="generate"):
+    def __init__(self, generator, prompt):
         super().__init__()
         self.generator = generator
         self.prompt = prompt
-        self.max_length = max_length
-        self.task_type = task_type
     
     def run(self):
-        """Generate text in background using GPT-2"""
+        """Generate 3 text continuations using FLAN-T5"""
         try:
             start_time = time.time()
             
-            # GPT-2 prompts - Uses continuation format (not instruction-following)
-            # GPT-2 continues text rather than following commands
-            if self.task_type == "paraphrase":
-                self.progress.emit("Paraphrasing entire document...")
-                prompt = f"Original text: {self.prompt}\n\nParaphrased version:"
-            elif self.task_type == "rewrite":
-                self.progress.emit("Rewriting entire document...")
-                prompt = f"Text with errors: {self.prompt}\n\nCorrected text:"
-            elif self.task_type == "formal":
-                self.progress.emit("Converting entire document to formal tone...")
-                prompt = f"{self.prompt}\n\nIn formal professional language:"
-            elif self.task_type == "casual":
-                self.progress.emit("Converting entire document to casual tone...")
-                prompt = f"{self.prompt}\n\nIn casual friendly language:"
-            elif self.task_type == "technical":
-                self.progress.emit("Converting entire document to technical style...")
-                prompt = f"{self.prompt}\n\nIn technical scientific language:"
-            elif self.task_type == "simple":
-                self.progress.emit("Simplifying entire document...")
-                prompt = f"{self.prompt}\n\nIn simple easy words:"
-            else:
-                self.progress.emit("Generating text...")
-                # Continue writing is GPT-2's strength - just give it the text
-                prompt = self.prompt
+            self.progress.emit("Generating 3 continuation suggestions...")
             
-            # GPT-2 generation
-            result = self.generator(
-                prompt,
-                max_new_tokens=150,  # Shorter = more focused
-                num_return_sequences=1,
-                do_sample=True,
-                temperature=0.5,  # Lower = more conservative
-                top_p=0.9,
-                top_k=40,
-                repetition_penalty=1.2,
-                no_repeat_ngram_size=3
-            )
+            # FLAN-T5 instruction format for text continuation
+            instruction = f"Write what happens next in the story with 2 to 3 sentences. Continue from here:\n\n{self.prompt}\n\nNext:"
             
-            # GPT-2 returns full text including prompt, so we need to extract just the new part
-            full_text = result[0]['generated_text']
-            
-            # For continue writing, remove the original prompt
-            if self.task_type == "generate":
-                generated_text = full_text[len(self.prompt):].strip()
-            else:
-                # For other tasks, try to extract text after the last newline
-                if '\n\n' in full_text:
-                    parts = full_text.split('\n\n')
-                    generated_text = parts[-1].strip()
-                else:
-                    # Fallback: remove the prompt
-                    generated_text = full_text[len(prompt):].strip()
+            # Generate 3 different suggestions
+            suggestions = []
+            for i in range(3):
+                self.progress.emit(f"Generating suggestion {i+1}/3...")
+                
+                result = self.generator(
+                    instruction,
+                    max_new_tokens=80,
+                    min_new_tokens=30,
+                    num_return_sequences=1,
+                    do_sample=True,
+                    temperature=0.8 + (i * 0.2),  # Vary temperature for diversity
+                    top_p=0.92,
+                    top_k=50,
+                    repetition_penalty=1.3,
+                    no_repeat_ngram_size=3
+                )
+                
+                generated_text = result[0]['generated_text'].strip()
+                suggestions.append(generated_text)
             
             gen_time = time.time() - start_time
             
-            self.finished.emit(generated_text, gen_time)
+            self.finished.emit(suggestions, gen_time)
             
         except Exception as e:
-            self.finished.emit(f"Error: {str(e)}", 0.0)
+            self.finished.emit([f"Error: {str(e)}"], 0.0)
 
-class CollapsibleSection(QWidget):
-    """A collapsible section widget"""
+class CollapsiblePanel(QWidget):
+    """A collapsible panel for the sidebar"""
     def __init__(self, title, color="#4CAF50"):
         super().__init__()
         self.is_expanded = False
@@ -175,11 +99,12 @@ class CollapsibleSection(QWidget):
             QPushButton {{
                 background-color: {color};
                 color: white;
-                padding: 10px;
+                padding: 12px;
                 text-align: left;
                 border: none;
                 border-radius: 5px;
                 font-weight: bold;
+                font-size: 11px;
             }}
             QPushButton:hover {{
                 background-color: {self.adjust_color(color, -20)};
@@ -215,7 +140,6 @@ class CollapsibleSection(QWidget):
         self.is_expanded = not self.is_expanded
         if self.is_expanded:
             self.content.show()
-            # Update button text to show expanded state
             current_text = self.toggle_btn.text()
             self.toggle_btn.setText(current_text.replace("▶", "▼"))
         else:
@@ -223,19 +147,57 @@ class CollapsibleSection(QWidget):
             current_text = self.toggle_btn.text()
             self.toggle_btn.setText(current_text.replace("▼", "▶"))
 
+class SuggestionCard(QFrame):
+    """Clickable card for AI suggestions"""
+    clicked = pyqtSignal(str)
+    
+    def __init__(self, suggestion_text, number):
+        super().__init__()
+        self.suggestion_text = suggestion_text
+        self.setFrameStyle(QFrame.Shape.Box)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        # Style as card
+        self.setStyleSheet("""
+            SuggestionCard {
+                background-color: white;
+                border: 2px solid #2196F3;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            SuggestionCard:hover {
+                background-color: #E3F2FD;
+                border: 2px solid #1976D2;
+            }
+        """)
+        
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Number badge
+        number_label = QLabel(f"Option {number}")
+        number_label.setStyleSheet("color: #2196F3; font-weight: bold; font-size: 10px;")
+        layout.addWidget(number_label)
+        
+        # Suggestion text
+        text_label = QLabel(suggestion_text)
+        text_label.setWordWrap(True)
+        text_label.setStyleSheet("color: #333; font-size: 11px; margin-top: 5px;")
+        layout.addWidget(text_label)
+    
+    def mousePressEvent(self, event):
+        """Handle click"""
+        self.clicked.emit(self.suggestion_text)
+
 class QuillRnD(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("QUILL R&D - Technology Validation")
-        self.setGeometry(100, 100, 1200, 700)
+        self.setWindowTitle("QUILL Writing Assistant - Iteration 4")
+        self.setGeometry(100, 100, 1400, 800)
         
         # Initialize metrics
         self.metrics = {
             'languagetool_load_time': 0.0,
-            'model_load_time': 0.0,
-            'model_memory_mb': 0.0,
-            'quantized_load_time': 0.0,
-            'quantized_memory_mb': 0.0,
             'check_times': [],
             'database_operations': [],
             'generation_times': [],
@@ -323,25 +285,6 @@ class QuillRnD(QMainWindow):
         
         self.metrics['database_operations'].append(('init', db_time))
     
-    def save_preference(self, key, value):
-        """Save a preference to database"""
-        start_time = time.time()
-        self.cursor.execute('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)', 
-                          (key, value))
-        self.conn.commit()
-        save_time = time.time() - start_time
-        self.metrics['database_operations'].append(('save', save_time))
-        return save_time
-    
-    def load_preference(self, key, default=""):
-        """Load a preference from database"""
-        start_time = time.time()
-        self.cursor.execute('SELECT value FROM preferences WHERE key = ?', (key,))
-        result = self.cursor.fetchone()
-        load_time = time.time() - start_time
-        self.metrics['database_operations'].append(('load', load_time))
-        return result[0] if result else default
-    
     def save_document_to_db(self, filename, content):
         """Save document to database"""
         start_time = time.time()
@@ -365,7 +308,7 @@ class QuillRnD(QMainWindow):
         print(f"✓ Document deleted from database in {delete_time*1000:.2f}ms")
         return delete_time
     
-    def load_text_generator(self, quantized=False):
+    def load_text_generator(self):
         """Load text generation model (lazy loading)"""
         if not TRANSFORMERS_AVAILABLE:
             QMessageBox.warning(self, "Model Not Available", 
@@ -376,50 +319,23 @@ class QuillRnD(QMainWindow):
             return True
         
         try:
-            model_type = "quantized" if quantized else "standard"
-            print(f"\nLoading {model_type} GPT-2-Medium model for first use...")
-            
-            # Measure memory before
-            process = psutil.Process()
-            mem_before = process.memory_info().rss / 1024 / 1024
+            print(f"\nLoading FLAN-T5-Base model for first use...")
             
             start_time = time.time()
             
-            # Load model (USING GPT-2-Medium)
-            self.text_generator = pipeline('text-generation', model='gpt2-medium')
-            
-            # Apply quantization if requested
-            if quantized:
-                print("Applying dynamic quantization...")
-                self.text_generator.model = torch.quantization.quantize_dynamic(
-                    self.text_generator.model, {torch.nn.Linear}, dtype=torch.qint8
-                )
+            # Load FLAN-T5-Base model
+            self.text_generator = pipeline('text2text-generation', model='google/flan-t5-base')
             
             load_time = time.time() - start_time
             
-            # Measure memory after
-            mem_after = process.memory_info().rss / 1024 / 1024
-            memory_used = mem_after - mem_before
-            
-            if quantized:
-                self.metrics['quantized_load_time'] = load_time
-                self.metrics['quantized_memory_mb'] = memory_used
-            else:
-                self.metrics['model_load_time'] = load_time
-                self.metrics['model_memory_mb'] = memory_used
-            
             self.model_loaded = True
             
-            print(f"✓ {model_type.capitalize()} GPT-2-Medium loaded in {load_time:.2f}s ({memory_used:.1f}MB)")
+            print(f"✓ FLAN-T5-Base loaded in {load_time:.2f}s")
             
             # Save to database
             self.cursor.execute(
                 'INSERT INTO performance_metrics (metric_name, metric_value) VALUES (?, ?)',
-                (f'{model_type}_load_time', load_time)
-            )
-            self.cursor.execute(
-                'INSERT INTO performance_metrics (metric_name, metric_value) VALUES (?, ?)',
-                (f'{model_type}_memory_mb', memory_used)
+                ('model_load_time', load_time)
             )
             self.conn.commit()
             
@@ -438,340 +354,180 @@ class QuillRnD(QMainWindow):
         central_widget.setLayout(main_layout)
         
         # Title
-        title = QLabel("QUILL R&D - Complete Technology Validation")
-        title.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        title = QLabel("QUILL Writing Assistant")
+        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #2196F3; padding: 10px;")
         main_layout.addWidget(title)
         
         # Create tabs
         tabs = QTabWidget()
         
-        tabs.addTab(self.create_grammar_tab(), "Writing Assistant")
-        tabs.addTab(self.create_model_tab(), "AI Model Testing")
-        tabs.addTab(self.create_database_tab(), "Database")
-        tabs.addTab(self.create_metrics_tab(), "Performance Metrics")
+        tabs.addTab(self.create_editor_tab(), "✍️ Writing Assistant")
+        tabs.addTab(self.create_database_tab(), "💾 Database")
+        tabs.addTab(self.create_metrics_tab(), "📊 Performance Metrics")
         
         main_layout.addWidget(tabs)
     
-    def create_grammar_tab(self):
-        """Tab 1: Complete Writing Assistant with collapsible sections"""
+    def create_editor_tab(self):
+        """Main editor tab with sidebar"""
         widget = QWidget()
         layout = QVBoxLayout()
-        layout.setContentsMargins(10, 5, 10, 10)
-        layout.setSpacing(5)
+        layout.setContentsMargins(10, 10, 10, 10)
         widget.setLayout(layout)
         
-        # File operations
+        # File operations toolbar
         file_btn_layout = QHBoxLayout()
         
-        open_btn = QPushButton("📂 Open File")
+        open_btn = QPushButton("📂 Open")
         open_btn.clicked.connect(self.open_file)
-        open_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px;")
+        open_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 4px;")
         file_btn_layout.addWidget(open_btn)
         
-        save_btn = QPushButton("💾 Save File")
+        save_btn = QPushButton("💾 Save")
         save_btn.clicked.connect(self.save_file)
-        save_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 3px;")
+        save_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 4px;")
         file_btn_layout.addWidget(save_btn)
         
         save_as_btn = QPushButton("📄 Save As")
         save_as_btn.clicked.connect(self.save_file_as)
-        save_as_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 3px;")
+        save_as_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 4px;")
         file_btn_layout.addWidget(save_as_btn)
         
-        save_db_btn = QPushButton("💾 Save to Database")
+        save_db_btn = QPushButton("💾 Save to DB")
         save_db_btn.clicked.connect(self.save_to_database)
-        save_db_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px;")
+        save_db_btn.setStyleSheet("background-color: #607D8B; color: white; padding: 8px; border-radius: 4px;")
         file_btn_layout.addWidget(save_db_btn)
         
-        # UNDO/REDO BUTTONS
         undo_btn = QPushButton("↶ Undo")
         undo_btn.clicked.connect(self.text_editor_undo)
-        undo_btn.setToolTip("Undo last change (Ctrl+Z)")
-        undo_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 8px;")
+        undo_btn.setToolTip("Undo (Ctrl+Z)")
+        undo_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 8px; border-radius: 4px;")
         file_btn_layout.addWidget(undo_btn)
         
         redo_btn = QPushButton("↷ Redo")
         redo_btn.clicked.connect(self.text_editor_redo)
-        redo_btn.setToolTip("Redo last undone change (Ctrl+Y)")
-        redo_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 8px;")
+        redo_btn.setToolTip("Redo (Ctrl+Y)")
+        redo_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 8px; border-radius: 4px;")
         file_btn_layout.addWidget(redo_btn)
         
         file_btn_layout.addStretch()
         layout.addLayout(file_btn_layout)
         
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # Main editor area with sidebar
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        # Left: Editor
-        editor_widget = QWidget()
+        # LEFT: Text Editor
+        editor_container = QWidget()
         editor_layout = QVBoxLayout()
-        editor_layout.setContentsMargins(0, 0, 0, 0)
-        editor_layout.setSpacing(8)
-        editor_widget.setLayout(editor_layout)
+        editor_layout.setContentsMargins(0, 5, 0, 0)
+        editor_container.setLayout(editor_layout)
         
-        # Text editor with context menu
         self.text_editor = QTextEdit()
-        self.text_editor.setPlaceholderText("Type or paste text here...\n\nReal-time grammar checking enabled!\nRight-click on underlined errors to fix them.")
+        self.text_editor.setPlaceholderText("Start writing here...\n\n✓ Real-time grammar checking enabled\n✓ Right-click errors to fix them\n✓ Use sidebar for AI suggestions")
         self.text_editor.setFont(QFont("Arial", 12))
         self.text_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.text_editor.customContextMenuRequested.connect(self.show_context_menu)
         self.text_editor.textChanged.connect(self.on_text_changed)
         editor_layout.addWidget(self.text_editor)
         
-        # Real-time toggle (NO CHECK BUTTON)
-        realtime_layout = QHBoxLayout()
-        self.realtime_check = QRadioButton("✓ Real-time Grammar Checking Enabled")
-        self.realtime_check.setChecked(True)
-        self.realtime_check.setEnabled(False)  # Always on
-        self.realtime_check.setStyleSheet("color: #4CAF50; font-weight: bold;")
-        realtime_layout.addWidget(self.realtime_check)
-        realtime_layout.addStretch()
-        editor_layout.addLayout(realtime_layout)
+        main_splitter.addWidget(editor_container)
         
-        # COLLAPSIBLE SECTION 1: Text Generation
-        self.gen_section = CollapsibleSection("✍️ AI Text Generation (Pillar 2)", "#2196F3")
+        # RIGHT: Collapsible Sidebar
+        sidebar = QWidget()
+        sidebar_layout = QVBoxLayout()
+        sidebar_layout.setContentsMargins(5, 5, 5, 5)
+        sidebar_layout.setSpacing(10)
+        sidebar.setLayout(sidebar_layout)
         
-        gen_btn_layout = QHBoxLayout()
-        gen_btn_layout.setSpacing(5)
+        # PANEL 1: Grammar Errors (starts collapsed)
+        self.grammar_panel = CollapsiblePanel("📝 Grammar Errors & Suggestions", "#4CAF50")
         
-        self.continue_btn = QPushButton("Continue Writing")
-        self.continue_btn.setFont(QFont("Arial", 9))
-        self.continue_btn.clicked.connect(self.continue_writing)
-        self.continue_btn.setToolTip("Uses AI to continue writing from current cursor position")
-        self.continue_btn.setStyleSheet("""
+        self.error_list = QListWidget()
+        self.error_list.setStyleSheet("font-size: 10px;")
+        self.grammar_panel.content_layout.addWidget(self.error_list)
+        
+        self.grammar_metrics_label = QLabel(f"Load time: {self.metrics['languagetool_load_time']:.2f}s")
+        self.grammar_metrics_label.setStyleSheet("color: gray; font-size: 9px;")
+        self.grammar_panel.content_layout.addWidget(self.grammar_metrics_label)
+        
+        sidebar_layout.addWidget(self.grammar_panel)
+        
+        # PANEL 2: Continue Writing (starts collapsed)
+        self.continue_panel = CollapsiblePanel("✨ Continue Writing", "#2196F3")
+        
+        continue_info = QLabel("Generate AI-powered continuations for your text")
+        continue_info.setWordWrap(True)
+        continue_info.setStyleSheet("color: #666; font-size: 10px; margin-bottom: 5px;")
+        self.continue_panel.content_layout.addWidget(continue_info)
+        
+        self.generate_btn = QPushButton("🎯 Generate Suggestions")
+        self.generate_btn.clicked.connect(self.generate_suggestions)
+        self.generate_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2196F3;
                 color: white;
-                padding: 8px;
+                padding: 12px;
                 border-radius: 5px;
+                font-weight: bold;
             }
             QPushButton:hover {
                 background-color: #1976D2;
             }
-        """)
-        gen_btn_layout.addWidget(self.continue_btn)
-        
-        self.paraphrase_btn = QPushButton("⚠️ Paraphrase All")
-        self.paraphrase_btn.setFont(QFont("Arial", 9))
-        self.paraphrase_btn.clicked.connect(self.paraphrase_text)
-        self.paraphrase_btn.setToolTip("Uses AI to rewrite your ENTIRE document with different words.\n⚠️ This replaces all your text!")
-        self.paraphrase_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF9800;
-                color: white;
-                padding: 8px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #F57C00;
+            QPushButton:disabled {
+                background-color: #BDBDBD;
             }
         """)
-        gen_btn_layout.addWidget(self.paraphrase_btn)
-        
-        self.rewrite_btn = QPushButton("⚠️ Rewrite All")
-        self.rewrite_btn.setFont(QFont("Arial", 9))
-        self.rewrite_btn.clicked.connect(self.rewrite_text)
-        self.rewrite_btn.setToolTip("Uses AI to improve grammar and clarity of your ENTIRE document.\n⚠️ This replaces all your text!")
-        self.rewrite_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #9C27B0;
-                color: white;
-                padding: 8px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #7B1FA2;
-            }
-        """)
-        gen_btn_layout.addWidget(self.rewrite_btn)
-        
-        self.gen_section.content_layout.addLayout(gen_btn_layout)
+        self.continue_panel.content_layout.addWidget(self.generate_btn)
         
         # Progress bar
         self.gen_progress = QProgressBar()
         self.gen_progress.setRange(0, 0)
+        self.gen_progress.setStyleSheet("margin-top: 5px;")
         self.gen_progress.hide()
-        self.gen_section.content_layout.addWidget(self.gen_progress)
+        self.continue_panel.content_layout.addWidget(self.gen_progress)
         
-        # Status
+        # Status label
         self.gen_status = QLabel("")
-        self.gen_status.setStyleSheet("color: #2196F3; font-style: italic; font-size: 10px;")
-        self.gen_section.content_layout.addWidget(self.gen_status)
+        self.gen_status.setStyleSheet("color: #2196F3; font-style: italic; font-size: 9px;")
+        self.continue_panel.content_layout.addWidget(self.gen_status)
         
-        editor_layout.addWidget(self.gen_section)
+        # Suggestions container (cards will be added here)
+        self.suggestions_container = QWidget()
+        self.suggestions_layout = QVBoxLayout()
+        self.suggestions_layout.setSpacing(8)
+        self.suggestions_container.setLayout(self.suggestions_layout)
+        self.continue_panel.content_layout.addWidget(self.suggestions_container)
         
-        # COLLAPSIBLE SECTION 2: Tone Transformation
-        self.tone_section = CollapsibleSection("🎭 Tone Transformation (Pillar 3)", "#E91E63")
+        sidebar_layout.addWidget(self.continue_panel)
+        sidebar_layout.addStretch()
         
-        tone_row1 = QHBoxLayout()
-        tone_row1.setSpacing(10)
-        self.tone_formal = QRadioButton("Formal")
-        self.tone_casual = QRadioButton("Casual")
-        self.tone_formal.setChecked(True)
-        tone_row1.addWidget(self.tone_formal)
-        tone_row1.addWidget(self.tone_casual)
-        tone_row1.addStretch()
-        self.tone_section.content_layout.addLayout(tone_row1)
+        main_splitter.addWidget(sidebar)
+        main_splitter.setSizes([1000, 400])  # 70/30 split
         
-        tone_row2 = QHBoxLayout()
-        tone_row2.setSpacing(10)
-        self.tone_technical = QRadioButton("Technical")
-        self.tone_simple = QRadioButton("Simple")
-        tone_row2.addWidget(self.tone_technical)
-        tone_row2.addWidget(self.tone_simple)
-        tone_row2.addStretch()
-        self.tone_section.content_layout.addLayout(tone_row2)
-        
-        self.tone_group = QButtonGroup()
-        self.tone_group.addButton(self.tone_formal)
-        self.tone_group.addButton(self.tone_casual)
-        self.tone_group.addButton(self.tone_technical)
-        self.tone_group.addButton(self.tone_simple)
-        
-        self.transform_btn = QPushButton("⚠️ Transform All Text")
-        self.transform_btn.setFont(QFont("Arial", 10))
-        self.transform_btn.clicked.connect(self.transform_selection)
-        self.transform_btn.setToolTip("Uses AI to change the tone of your ENTIRE document.\n⚠️ This replaces all your text!")
-        self.transform_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #E91E63;
-                color: white;
-                padding: 10px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #C2185B;
-            }
-        """)
-        self.tone_section.content_layout.addWidget(self.transform_btn)
-        
-        editor_layout.addWidget(self.tone_section)
-        
-        splitter.addWidget(editor_widget)
-        
-        # Right: Errors
-        error_widget = QWidget()
-        error_layout = QVBoxLayout()
-        error_layout.setContentsMargins(0, 0, 0, 0)
-        error_layout.setSpacing(5)
-        error_widget.setLayout(error_layout)
-        
-        error_label = QLabel("Grammar Errors & Suggestions (Pillar 1):")
-        error_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
-        error_layout.addWidget(error_label)
-        
-        self.error_list = QListWidget()
-        error_layout.addWidget(self.error_list)
-        
-        self.grammar_metrics_label = QLabel(f"Load time: {self.metrics['languagetool_load_time']:.2f}s")
-        self.grammar_metrics_label.setStyleSheet("color: gray; font-size: 10px;")
-        error_layout.addWidget(self.grammar_metrics_label)
-        
-        splitter.addWidget(error_widget)
-        splitter.setSizes([650, 350])
-        
-        layout.addWidget(splitter)
+        layout.addWidget(main_splitter)
         
         return widget
     
     def text_editor_undo(self):
-        """Undo last change in text editor"""
+        """Undo last change"""
         self.text_editor.undo()
-        print("↶ Undo")
     
     def text_editor_redo(self):
-        """Redo last undone change in text editor"""
+        """Redo last change"""
         self.text_editor.redo()
-        print("↷ Redo")
-    
-    def create_model_tab(self):
-        """Tab 2: AI Model loading and testing"""
-        widget = QWidget()
-        layout = QVBoxLayout()
-        widget.setLayout(layout)
-        
-        if not TRANSFORMERS_AVAILABLE:
-            warning_label = QLabel("⚠ Transformers library not installed")
-            warning_label.setStyleSheet("color: orange; font-weight: bold; font-size: 14px;")
-            layout.addWidget(warning_label)
-            
-            install_info = QLabel("To test this technology, run:\npip install transformers torch")
-            install_info.setStyleSheet("color: gray; font-style: italic;")
-            layout.addWidget(install_info)
-            
-            layout.addStretch()
-            return widget
-        
-        info_label = QLabel("✓ Technology Available: Transformers + PyTorch")
-        info_label.setStyleSheet("color: green; font-weight: bold;")
-        layout.addWidget(info_label)
-        
-        desc_label = QLabel("This tests loading GPT-2-Medium with and without quantization")
-        layout.addWidget(desc_label)
-        
-        # Progress bar
-        self.model_progress = QProgressBar()
-        self.model_progress.setRange(0, 0)
-        self.model_progress.hide()
-        layout.addWidget(self.model_progress)
-        
-        # Status label
-        self.model_status = QLabel("Load models to compare performance")
-        self.model_status.setWordWrap(True)
-        layout.addWidget(self.model_status)
-        
-        # Load buttons
-        btn_layout = QHBoxLayout()
-        
-        load_standard_btn = QPushButton("Load Standard Model")
-        load_standard_btn.setFont(QFont("Arial", 12))
-        load_standard_btn.clicked.connect(lambda: self.test_model_loading(False))
-        load_standard_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 15px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-        """)
-        btn_layout.addWidget(load_standard_btn)
-        
-        load_quantized_btn = QPushButton("Load Quantized Model")
-        load_quantized_btn.setFont(QFont("Arial", 12))
-        load_quantized_btn.clicked.connect(lambda: self.test_model_loading(True))
-        load_quantized_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #FF5722;
-                color: white;
-                padding: 15px;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #E64A19;
-            }
-        """)
-        btn_layout.addWidget(load_quantized_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        layout.addStretch()
-        
-        return widget
     
     def create_database_tab(self):
-        """Tab 3: Database testing"""
+        """Database management tab"""
         widget = QWidget()
         layout = QVBoxLayout()
         widget.setLayout(layout)
         
-        info_label = QLabel("✓ Technology Tested: SQLite Database")
-        info_label.setStyleSheet("color: green; font-weight: bold;")
+        info_label = QLabel("✓ SQLite Database")
+        info_label.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
         layout.addWidget(info_label)
         
-        db_info = QLabel(f"Database location: {os.path.abspath(self.db_path)}")
+        db_info = QLabel(f"Location: {os.path.abspath(self.db_path)}")
         db_info.setStyleSheet("color: gray; font-size: 10px;")
         layout.addWidget(db_info)
         
@@ -786,7 +542,7 @@ class QuillRnD(QMainWindow):
         
         layout.addWidget(stats_group)
         
-        # Document Viewer
+        # Document viewer
         viewer_group = QGroupBox("Saved Documents")
         viewer_layout = QVBoxLayout()
         viewer_group.setLayout(viewer_layout)
@@ -797,67 +553,31 @@ class QuillRnD(QMainWindow):
         
         btn_layout = QHBoxLayout()
         
-        refresh_docs_btn = QPushButton("🔄 Refresh List")
-        refresh_docs_btn.clicked.connect(self.refresh_document_list)
-        refresh_docs_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px; border-radius: 3px;")
-        btn_layout.addWidget(refresh_docs_btn)
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.clicked.connect(self.refresh_document_list)
+        refresh_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px; border-radius: 3px;")
+        btn_layout.addWidget(refresh_btn)
         
-        load_doc_btn = QPushButton("📂 Load Selected")
-        load_doc_btn.clicked.connect(self.load_selected_document)
-        load_doc_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px; border-radius: 3px;")
-        btn_layout.addWidget(load_doc_btn)
-        
-        # DELETE BUTTON
-        delete_doc_btn = QPushButton("🗑️ Delete Selected")
-        delete_doc_btn.clicked.connect(self.delete_selected_document)
-        delete_doc_btn.setStyleSheet("background-color: #F44336; color: white; padding: 8px; border-radius: 3px;")
-        btn_layout.addWidget(delete_doc_btn)
-        
-        viewer_layout.addLayout(btn_layout)
-        
-        layout.addWidget(viewer_group)
-        
-        # Test save/load
-        test_group = QGroupBox("Test Save/Load Preferences")
-        test_layout = QVBoxLayout()
-        test_group.setLayout(test_layout)
-        
-        input_layout = QHBoxLayout()
-        input_layout.addWidget(QLabel("Test Value:"))
-        self.db_test_input = QTextEdit()
-        self.db_test_input.setMaximumHeight(60)
-        self.db_test_input.setPlaceholderText("Enter text to save...")
-        input_layout.addWidget(self.db_test_input)
-        test_layout.addLayout(input_layout)
-        
-        btn_layout = QHBoxLayout()
-        
-        save_btn = QPushButton("Save to Database")
-        save_btn.clicked.connect(self.test_database_save)
-        save_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px;")
-        btn_layout.addWidget(save_btn)
-        
-        load_btn = QPushButton("Load from Database")
-        load_btn.clicked.connect(self.test_database_load)
-        load_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px;")
+        load_btn = QPushButton("📂 Load")
+        load_btn.clicked.connect(self.load_selected_document)
+        load_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 8px; border-radius: 3px;")
         btn_layout.addWidget(load_btn)
         
-        test_layout.addLayout(btn_layout)
+        delete_btn = QPushButton("🗑️ Delete")
+        delete_btn.clicked.connect(self.delete_selected_document)
+        delete_btn.setStyleSheet("background-color: #F44336; color: white; padding: 8px; border-radius: 3px;")
+        btn_layout.addWidget(delete_btn)
         
-        self.db_status = QLabel("Ready to test database operations")
-        self.db_status.setWordWrap(True)
-        test_layout.addWidget(self.db_status)
-        
-        layout.addWidget(test_group)
+        viewer_layout.addLayout(btn_layout)
+        layout.addWidget(viewer_group)
         layout.addStretch()
         
-        # Auto-refresh document list
         QTimer.singleShot(100, self.refresh_document_list)
         
         return widget
     
     def create_metrics_tab(self):
-        """Tab 4: Performance metrics summary"""
+        """Performance metrics tab"""
         widget = QWidget()
         layout = QVBoxLayout()
         widget.setLayout(layout)
@@ -881,14 +601,12 @@ class QuillRnD(QMainWindow):
     
     def on_text_changed(self):
         """Handle text changes - trigger debounced grammar check"""
-        if self.realtime_check.isChecked():
-            # Restart timer (debounce)
-            self.grammar_check_timer.stop()
-            self.grammar_check_timer.start(1000)  # 1 second delay
+        # Restart timer (debounce)
+        self.grammar_check_timer.stop()
+        self.grammar_check_timer.start(1000)  # 1 second delay
     
     def auto_check_grammar(self):
-        """Auto-check grammar (called by timer)"""
-        print("🔄 Auto-checking grammar...")
+        """Auto-check grammar"""
         self.check_grammar()
     
     def check_grammar(self):
@@ -897,26 +615,21 @@ class QuillRnD(QMainWindow):
         
         if not text.strip():
             self.error_list.clear()
-            self.error_list.addItem("No text to check!")
+            self.error_list.addItem("No text to check")
             self.grammar_matches = []
             return
         
-        print("\nChecking grammar...")
         start_time = time.time()
         
         matches = self.grammar_tool.check(text)
-        self.grammar_matches = matches  # Store for context menu
+        self.grammar_matches = matches
         
         check_time = time.time() - start_time
         self.metrics['check_times'].append(check_time)
-        print(f"✓ Grammar check completed in {check_time:.2f}s (found {len(matches)} issues)")
         
         avg_check = sum(self.metrics['check_times']) / len(self.metrics['check_times'])
         self.grammar_metrics_label.setText(
-            f"Load: {self.metrics['languagetool_load_time']:.2f}s | "
-            f"Last check: {check_time:.2f}s | "
-            f"Avg: {avg_check:.2f}s | "
-            f"Errors: {len(matches)}"
+            f"Errors: {len(matches)} | Last check: {check_time:.2f}s | Avg: {avg_check:.2f}s"
         )
         
         self.clear_highlights()
@@ -940,7 +653,7 @@ class QuillRnD(QMainWindow):
             
             cursor.setCharFormat(error_format)
             
-            error_text = f"{match.rule_id}: {match.message}"
+            error_text = f"{match.message}"
             if match.replacements:
                 error_text += f" → {match.replacements[0]}"
             self.error_list.addItem(error_text)
@@ -955,35 +668,30 @@ class QuillRnD(QMainWindow):
         self.text_editor.setTextCursor(cursor)
     
     def show_context_menu(self, position):
-        """Show context menu with grammar suggestions on right-click"""
+        """Show context menu with grammar suggestions"""
         cursor = self.text_editor.cursorForPosition(position)
         click_pos = cursor.position()
         
-        # Find if we clicked on an error
         matching_errors = []
         for match in self.grammar_matches:
             if match.offset <= click_pos <= match.offset + match.error_length:
                 matching_errors.append(match)
         
         if not matching_errors:
-            # No error at click position - show default menu
             self.text_editor.createStandardContextMenu().exec(self.text_editor.mapToGlobal(position))
             return
         
-        # Create custom context menu with suggestions
         menu = QMenu(self.text_editor)
         
         for match in matching_errors:
-            # Add error description as disabled item
             error_action = QAction(f"📝 {match.message}", self.text_editor)
             error_action.setEnabled(False)
             menu.addAction(error_action)
             
             menu.addSeparator()
             
-            # Add suggestions
             if match.replacements:
-                for i, suggestion in enumerate(match.replacements[:5]):  # Max 5 suggestions
+                for suggestion in match.replacements[:5]:
                     action = QAction(f"✓ {suggestion}", self.text_editor)
                     action.triggered.connect(lambda checked, m=match, s=suggestion: self.apply_suggestion(m, s))
                     menu.addAction(action)
@@ -992,7 +700,6 @@ class QuillRnD(QMainWindow):
                 no_sugg.setEnabled(False)
                 menu.addAction(no_sugg)
             
-            # Add ignore option
             menu.addSeparator()
             ignore_action = QAction("✖ Ignore", self.text_editor)
             ignore_action.triggered.connect(lambda checked, m=match: self.ignore_error(m))
@@ -1001,233 +708,20 @@ class QuillRnD(QMainWindow):
         menu.exec(self.text_editor.mapToGlobal(position))
     
     def apply_suggestion(self, match, suggestion):
-        """Apply a grammar suggestion"""
+        """Apply grammar suggestion"""
         cursor = self.text_editor.textCursor()
         cursor.setPosition(match.offset)
         cursor.setPosition(match.offset + match.error_length, QTextCursor.MoveMode.KeepAnchor)
         cursor.insertText(suggestion)
         
-        print(f"✓ Applied suggestion: '{suggestion}'")
-        
-        # Re-check grammar after change
         QTimer.singleShot(500, self.check_grammar)
     
     def ignore_error(self, match):
-        """Ignore an error (just remove highlight)"""
-        print(f"✗ Ignored error: {match.message}")
-        # Re-check to update display
+        """Ignore error"""
         QTimer.singleShot(100, self.check_grammar)
     
-    def open_file(self):
-        """Open a text file"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open File",
-            "",
-            "Text Files (*.txt *.md);;Word Documents (*.docx);;All Files (*)"
-        )
-        
-        if not file_path:
-            return
-        
-        try:
-            if file_path.endswith('.docx') and DOCX_AVAILABLE:
-                # Read .docx file
-                doc = Document(file_path)
-                text = '\n'.join([paragraph.text for paragraph in doc.paragraphs])
-            else:
-                # Read plain text file
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            
-            self.text_editor.setPlainText(text)
-            self.current_file_path = file_path
-            print(f"✓ Opened file: {file_path}")
-            
-            # Auto-check grammar
-            if self.realtime_check.isChecked():
-                QTimer.singleShot(500, self.check_grammar)
-            
-            # Update status bar
-            self.update_status_bar()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to open file:\n{str(e)}")
-    
-    def save_file(self):
-        """Save text to current file or use Save As if new"""
-        if self.current_file_path:
-            # Save to existing file
-            file_path = self.current_file_path
-        else:
-            # No current file, use Save As
-            self.save_file_as()
-            return
-        
-        try:
-            text = self.text_editor.toPlainText()
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(text)
-            
-            self.update_status_bar()
-            if hasattr(self, 'status_saved'):
-                self.status_saved.setText(f"Saved at {time.strftime('%H:%M:%S')}")
-                QTimer.singleShot(3000, lambda: self.status_saved.setText(""))
-            print(f"✓ Saved file: {file_path}")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save file:\n{str(e)}")
-    
-    def save_file_as(self):
-        """Save file with new name (always prompts)"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save File As",
-            "",
-            "Text Files (*.txt);;Markdown Files (*.md);;All Files (*)"
-        )
-        
-        if not file_path:
-            return
-        
-        try:
-            text = self.text_editor.toPlainText()
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(text)
-            
-            self.current_file_path = file_path
-            self.update_status_bar()
-            if hasattr(self, 'status_saved'):
-                self.status_saved.setText(f"Saved at {time.strftime('%H:%M:%S')}")
-                QTimer.singleShot(3000, lambda: self.status_saved.setText(""))
-            print(f"✓ Saved file as: {file_path}")
-            QMessageBox.information(self, "Success", f"File saved: {os.path.basename(file_path)}")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save file:\n{str(e)}")
-    
-    def save_to_database(self):
-        """Save current document to database with custom name"""
-        text = self.text_editor.toPlainText()
-        
-        if not text.strip():
-            QMessageBox.warning(self, "No Content", "Please enter some text first!")
-            return
-        
-        # Get default filename
-        default_name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled Document"
-        
-        # Prompt user for filename
-        filename, ok = QInputDialog.getText(
-            self,
-            "Save to Database",
-            "Enter document name:",
-            text=default_name
-        )
-        
-        # If user cancelled or entered empty name, use default
-        if not ok or not filename.strip():
-            if not ok:
-                return  # User cancelled
-            filename = default_name
-        
-        save_time = self.save_document_to_db(filename, text)
-        self.update_doc_stats()
-        self.refresh_document_list()
-        
-        QMessageBox.information(self, "Success", 
-                               f"Document saved to database!\n\nFilename: {filename}\nTime: {save_time*1000:.2f}ms")
-    
-    def update_doc_stats(self):
-        """Update document statistics"""
-        self.cursor.execute('SELECT COUNT(*) FROM documents')
-        total_docs = self.cursor.fetchone()[0]
-        
-        self.cursor.execute('SELECT COUNT(*) FROM performance_metrics')
-        total_metrics = self.cursor.fetchone()[0]
-        
-        stats_text = f"Documents saved: {total_docs}\n"
-        stats_text += f"Metrics recorded: {total_metrics}\n"
-        stats_text += f"Documents processed this session: {self.metrics['documents_processed']}"
-        
-        self.doc_stats_label.setText(stats_text)
-    
-    def refresh_document_list(self):
-        """Refresh the list of saved documents from database"""
-        if not hasattr(self, 'doc_list'):
-            return  # UI not yet initialized
-            
-        self.doc_list.clear()
-        
-        self.cursor.execute('SELECT id, filename, created_at FROM documents ORDER BY created_at DESC')
-        documents = self.cursor.fetchall()
-        
-        for doc_id, filename, created_at in documents:
-            item_text = f"{filename} - {created_at}"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, doc_id)  # Store ID
-            self.doc_list.addItem(item)
-        
-        print(f"✓ Loaded {len(documents)} documents from database")
-    
-    def load_selected_document(self):
-        """Load the selected document from the list"""
-        current_item = self.doc_list.currentItem()
-        if not current_item:
-            QMessageBox.warning(self, "No Selection", "Please select a document to load")
-            return
-        
-        doc_id = current_item.data(Qt.ItemDataRole.UserRole)
-        self.load_document_from_db_by_id(doc_id)
-    
-    def delete_selected_document(self):
-        """Delete the selected document from database"""
-        current_item = self.doc_list.currentItem()
-        if not current_item:
-            QMessageBox.warning(self, "No Selection", "Please select a document to delete")
-            return
-        
-        doc_id = current_item.data(Qt.ItemDataRole.UserRole)
-        
-        # Confirm deletion
-        reply = QMessageBox.question(
-            self,
-            'Delete Document',
-            f'Are you sure you want to delete this document?\n\n{current_item.text()}',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if reply == QMessageBox.StandardButton.Yes:
-            self.delete_document_from_db(doc_id)
-            self.refresh_document_list()
-            self.update_doc_stats()
-            QMessageBox.information(self, "Success", "Document deleted from database")
-            print(f"✓ Document deleted (ID: {doc_id})")
-    
-    def load_document_from_db(self, item):
-        """Load a document from database when double-clicked"""
-        doc_id = item.data(Qt.ItemDataRole.UserRole)
-        self.load_document_from_db_by_id(doc_id)
-    
-    def load_document_from_db_by_id(self, doc_id):
-        """Load a document from database by ID"""
-        self.cursor.execute('SELECT filename, content FROM documents WHERE id = ?', (doc_id,))
-        result = self.cursor.fetchone()
-        
-        if result:
-            filename, content = result
-            self.text_editor.setPlainText(content)
-            self.current_file_path = None  # Mark as unsaved to disk
-            self.update_status_bar()
-            if hasattr(self, 'status_file'):
-                self.status_file.setText(f"DB: {filename}")
-            print(f"✓ Loaded document from database: {filename}")
-            QMessageBox.information(self, "Success", f"Loaded: {filename}")
-        else:
-            QMessageBox.warning(self, "Error", "Document not found in database")
-    
-    def continue_writing(self):
-        """Continue writing from cursor position"""
+    def generate_suggestions(self):
+        """Generate 3 AI continuation suggestions"""
         if not self.load_text_generator():
             return
         
@@ -1242,134 +736,56 @@ class QuillRnD(QMainWindow):
             QMessageBox.warning(self, "No Text", "Please type some text first!")
             return
         
-        print(f"\nGenerating continuation from: '{prompt[-50:]}'...")
+        # Limit prompt to last 500 characters
+        if len(prompt) > 500:
+            prompt = prompt[-500:]
+        
+        print(f"\nGenerating 3 suggestions...")
+        
+        # Clear previous suggestions
+        self.clear_suggestions()
         
         self.gen_progress.show()
-        self.gen_status.setText("Generating text continuation...")
-        self.continue_btn.setEnabled(False)
+        self.gen_status.setText("Generating suggestions...")
+        self.generate_btn.setEnabled(False)
         
-        self.generator_thread = TextGeneratorThread(
-            self.text_generator, 
-            prompt, 
-            max_length=150,
-            task_type="generate"
-        )
+        self.generator_thread = TextGeneratorThread(self.text_generator, prompt)
         self.generator_thread.progress.connect(self.update_generation_progress)
-        self.generator_thread.finished.connect(self.generation_finished)
+        self.generator_thread.finished.connect(self.display_suggestions)
         self.generator_thread.start()
     
-    def paraphrase_text(self):
-        """Paraphrase ALL text"""
-        if not self.load_text_generator():
-            return
-        
-        all_text = self.text_editor.toPlainText()
-        
-        if not all_text.strip():
-            QMessageBox.warning(self, "No Text", "Please type some text first!")
-            return
-        
-        print(f"\nParaphrasing entire document ({len(all_text)} chars)...")
-        
-        self.gen_progress.show()
-        self.gen_status.setText("Paraphrasing entire document...")
-        self.paraphrase_btn.setEnabled(False)
-        
-        self.generator_thread = TextGeneratorThread(
-            self.text_generator, 
-            all_text, 
-            max_length=512,
-            task_type="paraphrase"
-        )
-        self.generator_thread.progress.connect(self.update_generation_progress)
-        self.generator_thread.finished.connect(lambda text, time: self.replace_all_text_finished(text, time, "paraphrase"))
-        self.generator_thread.start()
-    
-    def rewrite_text(self):
-        """Rewrite ALL text"""
-        if not self.load_text_generator():
-            return
-        
-        all_text = self.text_editor.toPlainText()
-        
-        if not all_text.strip():
-            QMessageBox.warning(self, "No Text", "Please type some text first!")
-            return
-        
-        print(f"\nRewriting entire document ({len(all_text)} chars)...")
-        
-        self.gen_progress.show()
-        self.gen_status.setText("Rewriting entire document...")
-        self.rewrite_btn.setEnabled(False)
-        
-        self.generator_thread = TextGeneratorThread(
-            self.text_generator, 
-            all_text, 
-            max_length=512,
-            task_type="rewrite"
-        )
-        self.generator_thread.progress.connect(self.update_generation_progress)
-        self.generator_thread.finished.connect(lambda text, time: self.replace_all_text_finished(text, time, "rewrite"))
-        self.generator_thread.start()
-    
-    def transform_selection(self):
-        """Transform ALL text based on tone"""
-        if not self.load_text_generator():
-            return
-        
-        all_text = self.text_editor.toPlainText()
-        
-        if not all_text.strip():
-            QMessageBox.warning(self, "No Text", "Please type some text first!")
-            return
-        
-        task_type = None
-        
-        if self.tone_formal.isChecked():
-            task_type = "formal"
-        elif self.tone_casual.isChecked():
-            task_type = "casual"
-        elif self.tone_technical.isChecked():
-            task_type = "technical"
-        elif self.tone_simple.isChecked():
-            task_type = "simple"
-        
-        print(f"\nTransforming entire document to {task_type} ({len(all_text)} chars)...")
-        
-        self.gen_progress.show()
-        self.gen_status.setText(f"Transforming entire document to {task_type}...")
-        self.transform_btn.setEnabled(False)
-        
-        self.generator_thread = TextGeneratorThread(
-            self.text_generator, 
-            all_text, 
-            max_length=512,
-            task_type=task_type
-        )
-        self.generator_thread.progress.connect(self.update_generation_progress)
-        self.generator_thread.finished.connect(lambda text, time: self.transform_all_finished(text, time, task_type))
-        self.generator_thread.start()
+    def clear_suggestions(self):
+        """Clear suggestion cards"""
+        while self.suggestions_layout.count():
+            item = self.suggestions_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
     
     def update_generation_progress(self, message):
-        """Update generation progress message"""
+        """Update generation progress"""
         self.gen_status.setText(message)
     
-    def generation_finished(self, generated_text, gen_time):
-        """Handle text generation completion (for continuation)"""
+    def display_suggestions(self, suggestions, gen_time):
+        """Display 3 suggestion cards"""
         self.gen_progress.hide()
-        self.continue_btn.setEnabled(True)
+        self.generate_btn.setEnabled(True)
         
-        if generated_text.startswith("Error:"):
-            self.gen_status.setText(f"✖ {generated_text}")
+        if suggestions and suggestions[0].startswith("Error:"):
+            self.gen_status.setText(f"✗ {suggestions[0]}")
             return
         
-        cursor = self.text_editor.textCursor()
-        cursor.insertText(" " + generated_text)
+        self.gen_status.setText(f"✓ Generated in {gen_time:.2f}s - Click a suggestion to insert")
+        
+        # Clear previous cards
+        self.clear_suggestions()
+        
+        # Create 3 clickable cards
+        for i, suggestion in enumerate(suggestions, 1):
+            card = SuggestionCard(suggestion, i)
+            card.clicked.connect(self.insert_suggestion)
+            self.suggestions_layout.addWidget(card)
         
         self.metrics['generation_times'].append(('continue', gen_time))
-        
-        self.gen_status.setText(f"✓ Generated in {gen_time:.2f}s")
-        print(f"✓ Text continuation completed in {gen_time:.2f}s")
         
         self.cursor.execute(
             'INSERT INTO performance_metrics (metric_name, metric_value) VALUES (?, ?)',
@@ -1377,243 +793,247 @@ class QuillRnD(QMainWindow):
         )
         self.conn.commit()
     
-    def replace_all_text_finished(self, generated_text, gen_time, task_type):
-        """Handle paraphrase/rewrite completion"""
-        self.gen_progress.hide()
-        self.paraphrase_btn.setEnabled(True)
-        self.rewrite_btn.setEnabled(True)
+    def insert_suggestion(self, suggestion_text):
+        """Insert selected suggestion into text"""
+        cursor = self.text_editor.textCursor()
+        cursor.insertText(" " + suggestion_text)
         
-        if generated_text.startswith("Error:"):
-            self.gen_status.setText(f"✖ {generated_text}")
+        # Clear suggestion cards
+        self.clear_suggestions()
+        self.gen_status.setText("✓ Suggestion inserted!")
+        
+        print(f"✓ Inserted suggestion: {suggestion_text[:50]}...")
+    
+    def open_file(self):
+        """Open file"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open File", "",
+            "Text Files (*.txt *.md);;Word Documents (*.docx);;All Files (*)"
+        )
+        
+        if not file_path:
             return
         
-        self.text_editor.setPlainText(generated_text)
-        
-        self.metrics['generation_times'].append((task_type, gen_time))
-        
-        self.gen_status.setText(f"✓ {task_type.capitalize()}d entire document in {gen_time:.2f}s")
-        print(f"✓ {task_type.capitalize()} completed in {gen_time:.2f}s")
-        print(f"   Result length: {len(generated_text)} characters")
-        
-        self.cursor.execute(
-            'INSERT INTO performance_metrics (metric_name, metric_value) VALUES (?, ?)',
-            (f'{task_type}_time', gen_time)
-        )
-        self.conn.commit()
-    
-    def transform_all_finished(self, generated_text, gen_time, task_type):
-        """Handle transformation completion"""
-        self.gen_progress.hide()
-        self.transform_btn.setEnabled(True)
-        
-        if generated_text.startswith("Error:"):
-            self.gen_status.setText(f"✖ {generated_text}")
-            return
-        
-        self.text_editor.setPlainText(generated_text)
-        
-        self.metrics['generation_times'].append((f'transform_{task_type}', gen_time))
-        
-        self.gen_status.setText(f"✓ Transformed entire document to {task_type} in {gen_time:.2f}s")
-        print(f"✓ Transformation to {task_type} completed in {gen_time:.2f}s")
-        print(f"   Result length: {len(generated_text)} characters")
-        
-        self.cursor.execute(
-            'INSERT INTO performance_metrics (metric_name, metric_value) VALUES (?, ?)',
-            (f'transform_{task_type}_time', gen_time)
-        )
-        self.conn.commit()
-    
-    def test_model_loading(self, quantized=False):
-        """Test loading transformer model"""
-        model_type = "quantized" if quantized else "standard"
-        print(f"\nTesting {model_type} model loading...")
-        self.model_status.setText(f"Loading {model_type} model... (this may take 30-60 seconds)")
-        self.model_progress.show()
-        
-        self.model_loader_thread = ModelLoaderThread(quantized)
-        self.model_loader_thread.progress.connect(self.update_model_progress)
-        self.model_loader_thread.finished.connect(lambda msg, time, mem: self.model_loading_finished(msg, time, mem, quantized))
-        self.model_loader_thread.start()
-    
-    def update_model_progress(self, message):
-        """Update model loading progress"""
-        self.model_status.setText(message)
-    
-    def model_loading_finished(self, message, load_time, memory_mb, quantized):
-        """Handle model loading completion"""
-        self.model_progress.hide()
-        self.model_status.setText(message)
-        
-        if load_time > 0:
-            if quantized:
-                self.metrics['quantized_load_time'] = load_time
-                self.metrics['quantized_memory_mb'] = memory_mb
+        try:
+            if file_path.endswith('.docx') and DOCX_AVAILABLE:
+                doc = Document(file_path)
+                text = '\n'.join([paragraph.text for paragraph in doc.paragraphs])
             else:
-                self.metrics['model_load_time'] = load_time
-                self.metrics['model_memory_mb'] = memory_mb
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    text = f.read()
             
-            model_type = "quantized" if quantized else "standard"
-            print(f"✓ {model_type.capitalize()} model loaded in {load_time:.2f}s ({memory_mb:.1f}MB)")
+            self.text_editor.setPlainText(text)
+            self.current_file_path = file_path
+            self.update_status_bar()
             
-            self.cursor.execute(
-                'INSERT INTO performance_metrics (metric_name, metric_value) VALUES (?, ?)',
-                (f'{model_type}_load_time', load_time)
-            )
-            self.cursor.execute(
-                'INSERT INTO performance_metrics (metric_name, metric_value) VALUES (?, ?)',
-                (f'{model_type}_memory_mb', memory_mb)
-            )
-            self.conn.commit()
-        
-        self.update_metrics_display()
+            QTimer.singleShot(500, self.check_grammar)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open file:\n{str(e)}")
     
-    def test_database_save(self):
-        """Test saving to database"""
-        value = self.db_test_input.toPlainText()
-        if not value.strip():
-            self.db_status.setText("⚠ Enter some text first!")
+    def save_file(self):
+        """Save file"""
+        if self.current_file_path:
+            file_path = self.current_file_path
+        else:
+            self.save_file_as()
             return
         
-        save_time = self.save_preference('test_value', value)
-        self.db_status.setText(f"✓ Saved to database in {save_time*1000:.2f}ms")
-        print(f"✓ Database save completed in {save_time*1000:.2f}ms")
+        try:
+            text = self.text_editor.toPlainText()
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            
+            self.update_status_bar()
+            if hasattr(self, 'status_saved'):
+                self.status_saved.setText(f"Saved at {time.strftime('%H:%M:%S')}")
+                QTimer.singleShot(3000, lambda: self.status_saved.setText(""))
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save:\n{str(e)}")
     
-    def test_database_load(self):
-        """Test loading from database"""
-        loaded_value = self.load_preference('test_value', 'No data saved yet')
-        self.db_test_input.setText(loaded_value)
+    def save_file_as(self):
+        """Save file as"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save As", "",
+            "Text Files (*.txt);;Markdown (*.md);;All Files (*)"
+        )
         
-        load_time = self.metrics['database_operations'][-1][1]
-        self.db_status.setText(f"✓ Loaded from database in {load_time*1000:.2f}ms")
-        print(f"✓ Database load completed in {load_time*1000:.2f}ms")
+        if not file_path:
+            return
+        
+        try:
+            text = self.text_editor.toPlainText()
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            
+            self.current_file_path = file_path
+            self.update_status_bar()
+            QMessageBox.information(self, "Success", f"Saved: {os.path.basename(file_path)}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save:\n{str(e)}")
+    
+    def save_to_database(self):
+        """Save to database"""
+        text = self.text_editor.toPlainText()
+        
+        if not text.strip():
+            QMessageBox.warning(self, "No Content", "Please enter text first!")
+            return
+        
+        default_name = os.path.basename(self.current_file_path) if self.current_file_path else "Untitled"
+        
+        filename, ok = QInputDialog.getText(
+            self, "Save to Database", "Document name:", text=default_name
+        )
+        
+        if not ok or not filename.strip():
+            if not ok:
+                return
+            filename = default_name
+        
+        save_time = self.save_document_to_db(filename, text)
+        self.update_doc_stats()
+        self.refresh_document_list()
+        
+        QMessageBox.information(self, "Success", 
+                               f"Saved to database!\n\nTime: {save_time*1000:.2f}ms")
+    
+    def update_doc_stats(self):
+        """Update document statistics"""
+        self.cursor.execute('SELECT COUNT(*) FROM documents')
+        total_docs = self.cursor.fetchone()[0]
+        
+        self.cursor.execute('SELECT COUNT(*) FROM performance_metrics')
+        total_metrics = self.cursor.fetchone()[0]
+        
+        stats_text = f"Documents: {total_docs}\n"
+        stats_text += f"Metrics recorded: {total_metrics}\n"
+        stats_text += f"This session: {self.metrics['documents_processed']}"
+        
+        self.doc_stats_label.setText(stats_text)
+    
+    def refresh_document_list(self):
+        """Refresh document list"""
+        if not hasattr(self, 'doc_list'):
+            return
+            
+        self.doc_list.clear()
+        
+        self.cursor.execute('SELECT id, filename, created_at FROM documents ORDER BY created_at DESC')
+        documents = self.cursor.fetchall()
+        
+        for doc_id, filename, created_at in documents:
+            item = QListWidgetItem(f"{filename} - {created_at}")
+            item.setData(Qt.ItemDataRole.UserRole, doc_id)
+            self.doc_list.addItem(item)
+    
+    def load_selected_document(self):
+        """Load selected document"""
+        current_item = self.doc_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "No Selection", "Select a document first")
+            return
+        
+        doc_id = current_item.data(Qt.ItemDataRole.UserRole)
+        self.load_document_from_db_by_id(doc_id)
+    
+    def delete_selected_document(self):
+        """Delete selected document"""
+        current_item = self.doc_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, "No Selection", "Select a document first")
+            return
+        
+        doc_id = current_item.data(Qt.ItemDataRole.UserRole)
+        
+        reply = QMessageBox.question(
+            self, 'Delete Document',
+            f'Delete this document?\n\n{current_item.text()}',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.delete_document_from_db(doc_id)
+            self.refresh_document_list()
+            self.update_doc_stats()
+    
+    def load_document_from_db(self, item):
+        """Load document on double-click"""
+        doc_id = item.data(Qt.ItemDataRole.UserRole)
+        self.load_document_from_db_by_id(doc_id)
+    
+    def load_document_from_db_by_id(self, doc_id):
+        """Load document by ID"""
+        self.cursor.execute('SELECT filename, content FROM documents WHERE id = ?', (doc_id,))
+        result = self.cursor.fetchone()
+        
+        if result:
+            filename, content = result
+            self.text_editor.setPlainText(content)
+            self.current_file_path = None
+            self.update_status_bar()
+            if hasattr(self, 'status_file'):
+                self.status_file.setText(f"DB: {filename}")
     
     def update_metrics_display(self):
-        """Update the metrics summary display"""
+        """Update metrics display"""
         report = "="*60 + "\n"
-        report += "QUILL R&D - TECHNOLOGY VALIDATION REPORT\n"
+        report += "QUILL WRITING ASSISTANT - PERFORMANCE REPORT\n"
         report += "="*60 + "\n\n"
         
         report += "1. PYQT6 (GUI Framework)\n"
-        report += "   Status: ✓ TESTED AND WORKING\n"
-        report += "   - Text editor with context menu\n"
-        report += "   - Multi-tab interface\n"
-        report += "   - File open/save dialogs\n"
-        report += "   - Real-time updates\n"
-        report += "   - Collapsible sections\n"
-        report += "   - Undo/Redo functionality\n\n"
+        report += "   Status: ✓ WORKING\n"
+        report += "   - Collapsible sidebar panels\n"
+        report += "   - Clickable suggestion cards\n"
+        report += "   - Real-time updates\n\n"
         
-        report += "2. LANGUAGETOOL (Grammar Checking - PILLAR 1)\n"
-        report += "   Status: ✓ TESTED AND WORKING\n"
+        report += "2. LANGUAGETOOL (Grammar Checking)\n"
+        report += "   Status: ✓ WORKING\n"
         report += f"   - Load time: {self.metrics['languagetool_load_time']:.2f}s\n"
         if self.metrics['check_times']:
             avg_check = sum(self.metrics['check_times']) / len(self.metrics['check_times'])
-            report += f"   - Average check time: {avg_check:.2f}s\n"
-            report += f"   - Total checks: {len(self.metrics['check_times'])}\n"
-        report += "   - Real-time checking: ✓ Implemented\n"
-        report += "   - Right-click context menu: ✓ Implemented\n\n"
+            report += f"   - Average check: {avg_check:.2f}s\n"
+            report += f"   - Total checks: {len(self.metrics['check_times'])}\n\n"
         
-        report += "3. FLAN-T5-XL (AI Model - PILLAR 2 & 3)\n"
+        report += "3. FLAN-T5-BASE (AI Text Generation)\n"
         if TRANSFORMERS_AVAILABLE:
-            if self.metrics['model_load_time'] > 0:
-                report += "   Status: ✓ STANDARD MODEL TESTED\n"
-                report += f"   - Load time: {self.metrics['model_load_time']:.2f}s\n"
-                report += f"   - Memory usage: {self.metrics['model_memory_mb']:.1f}MB\n"
-            
-            if self.metrics['quantized_load_time'] > 0:
-                report += "   Status: ✓ QUANTIZED MODEL TESTED\n"
-                report += f"   - Load time: {self.metrics['quantized_load_time']:.2f}s\n"
-                report += f"   - Memory usage: {self.metrics['quantized_memory_mb']:.1f}MB\n"
-                
-                if self.metrics['model_load_time'] > 0:
-                    speedup = self.metrics['model_load_time'] / self.metrics['quantized_load_time']
-                    mem_reduction = ((self.metrics['model_memory_mb'] - self.metrics['quantized_memory_mb']) 
-                                   / self.metrics['model_memory_mb'] * 100)
-                    report += f"   - Speedup: {speedup:.2f}x\n"
-                    report += f"   - Memory reduction: {mem_reduction:.1f}%\n"
-            
             if self.metrics['generation_times']:
-                report += f"   - Generations performed: {len(self.metrics['generation_times'])}\n"
+                report += "   Status: ✓ WORKING\n"
                 avg_gen = sum(t for _, t in self.metrics['generation_times']) / len(self.metrics['generation_times'])
-                report += f"   - Average generation time: {avg_gen:.2f}s\n"
+                report += f"   - Generations: {len(self.metrics['generation_times'])}\n"
+                report += f"   - Average time: {avg_gen:.2f}s\n\n"
+            else:
+                report += "   Status: ⚠ Not yet used\n\n"
         else:
-            report += "   Status: ⚠ NOT INSTALLED\n"
-        report += "\n"
+            report += "   Status: ⚠ Not installed\n\n"
         
         report += "4. SQLITE (Database)\n"
-        report += "   Status: ✓ TESTED AND WORKING\n"
-        report += f"   - Location: {os.path.abspath(self.db_path)}\n"
+        report += "   Status: ✓ WORKING\n"
         report += f"   - Documents saved: {self.metrics['documents_processed']}\n"
         if self.metrics['database_operations']:
-            report += f"   - Total operations: {len(self.metrics['database_operations'])}\n"
             avg_db = sum(t for _, t in self.metrics['database_operations']) / len(self.metrics['database_operations'])
-            report += f"   - Average op time: {avg_db*1000:.2f}ms\n"
-        report += "\n"
-        
-        report += "="*60 + "\n"
-        report += "FEATURE COMPLETION STATUS\n"
-        report += "="*60 + "\n"
-        report += "✓ Functional QTextEdit widget\n"
-        report += "✓ Text selection and cursor tracking\n"
-        report += "✓ Programmatic text insertion\n"
-        report += "✓ Color-coded highlighting\n"
-        report += "✓ Dynamic highlight updates (real-time)\n"
-        report += "✓ Suggestion sidebar\n"
-        report += "✓ Accept/reject buttons (right-click menu)\n"
-        report += "✓ Threading (QThread)\n"
-        report += "✓ Loading indicators\n"
-        report += "✓ Model loading (GPT-2-Medium)\n"
-        report += "✓ Memory measurement\n"
-        report += "✓ Text generation\n"
-        report += "✓ Dynamic quantization\n"
-        report += "✓ Performance comparison\n"
-        report += "✓ Grammar checking integration\n"
-        report += "✓ Error display\n"
-        report += "✓ End-to-end pipeline\n"
-        report += "✓ Debounced processing\n"
-        report += "✓ SQLite database\n"
-        report += "✓ Save/load preferences\n"
-        report += "✓ File upload/save\n"
-        report += "✓ Document storage\n"
-        report += "✓ Document deletion\n"
-        report += "✓ Collapsible UI sections\n"
-        report += "✓ Undo/Redo functionality\n"
+            report += f"   - Average op: {avg_db*1000:.2f}ms\n\n"
         
         self.metrics_display.setText(report)
     
-    def new_document(self):
-        """Create new document"""
-        if self.text_editor.toPlainText().strip():
-            reply = QMessageBox.question(self, 'New Document', 
-                                        'Current document will be cleared. Continue?',
-                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.No:
-                return
-        
-        self.text_editor.clear()
-        self.current_file_path = None
-        self.update_status_bar()
-        print("✓ New document created")
-    
     def setup_keyboard_shortcuts(self):
-        """Setup keyboard shortcuts"""
+        """Setup shortcuts"""
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
         QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self.save_file)
         QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(self.save_file_as)
-        QShortcut(QKeySequence("Ctrl+N"), self).activated.connect(self.new_document)
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.text_editor_undo)
         QShortcut(QKeySequence("Ctrl+Y"), self).activated.connect(self.text_editor_redo)
-        print("✓ Keyboard shortcuts enabled: Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+N, Ctrl+Z, Ctrl+Y")
     
     def setup_status_bar(self):
-        """Setup status bar at bottom of window"""
+        """Setup status bar"""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         
-        # Create status labels
-        self.status_file = QLabel("No file loaded")
+        self.status_file = QLabel("No file")
         self.status_words = QLabel("Words: 0")
-        self.status_chars = QLabel("Characters: 0")
+        self.status_chars = QLabel("Chars: 0")
         self.status_saved = QLabel("")
         
         self.status_bar.addWidget(self.status_file)
@@ -1621,61 +1041,47 @@ class QuillRnD(QMainWindow):
         self.status_bar.addPermanentWidget(self.status_chars)
         self.status_bar.addPermanentWidget(self.status_saved)
         
-        # Connect text editor to update status
         self.text_editor.textChanged.connect(self.update_status_bar)
-        
-        print("✓ Status bar initialized")
     
     def update_status_bar(self):
-        """Update status bar with current document stats"""
+        """Update status bar"""
         if not hasattr(self, 'status_words'):
-            return  # Status bar not yet initialized
+            return
             
         text = self.text_editor.toPlainText()
         word_count = len(text.split()) if text.strip() else 0
         char_count = len(text)
         
         self.status_words.setText(f"Words: {word_count}")
-        self.status_chars.setText(f"Characters: {char_count}")
+        self.status_chars.setText(f"Chars: {char_count}")
         
         if self.current_file_path:
             self.status_file.setText(f"File: {os.path.basename(self.current_file_path)}")
         else:
-            self.status_file.setText("Untitled Document")
+            self.status_file.setText("Untitled")
     
     def closeEvent(self, event):
-        """Clean up when closing"""
+        """Cleanup"""
         self.conn.close()
-        print("\n" + "="*60)
-        print("Application closed - Database connection closed")
-        print("="*60)
         event.accept()
 
 
 def main():
-    """Run the application"""
     print("\n" + "="*60)
-    print("QUILL R&D - COMPLETE TECHNOLOGY VALIDATION")
+    print("QUILL WRITING ASSISTANT - ITERATION 4")
     print("="*60)
-    print("\nFeatures implemented:")
-    print("  ✓ PyQt6 (GUI Framework)")
-    print("  ✓ LanguageTool (Grammar)")
-    print("  ✓ GPT-2-Medium (AI Model - UPGRADED)")
-    print("  ✓ SQLite (Database)")
-    print("  ✓ Real-time checking")
-    print("  ✓ Right-click corrections")
-    print("  ✓ File upload/save")
-    print("  ✓ Model quantization")
-    print("  ✓ Performance metrics")
-    print("  ✓ Collapsible UI sections")
-    print("  ✓ Undo/Redo")
-    print("  ✓ Database document deletion")
+    print("\nFeatures:")
+    print("  ✓ Real-time grammar checking")
+    print("  ✓ Right-click error correction")
+    print("  ✓ AI text continuation (3 suggestions)")
+    print("  ✓ Collapsible sidebar panels")
+    print("  ✓ SQLite database storage")
+    print("  ✓ Professional UI/UX")
     print("\n" + "="*60 + "\n")
     
     app = QApplication(sys.argv)
     window = QuillRnD()
     window.show()
-    
     sys.exit(app.exec())
 
 
